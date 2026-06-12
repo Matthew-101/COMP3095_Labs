@@ -1,84 +1,93 @@
 package ca.gbc.comp3095.inventoryservice;
 
-import io.restassured.RestAssured;
+import ca.gbc.comp3095.inventoryservice.model.Inventory;
+import ca.gbc.comp3095.inventoryservice.repository.InventoryRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.testcontainers.containers.PostgreSQLContainer;
+import org.springframework.context.annotation.Import;
+import org.springframework.test.web.reactive.server.WebTestClient;
 
-import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.is;
-
-// Tells Spring Boot to start the application with a random port for testing
+// Full Spring context on a random port — exercises the real HTTP stack, Flyway, and JPA.
+@Import(TestcontainersConfiguration.class)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-public class InventoryServiceApplicationTests {
+class InventoryServiceApplicationTests {
 
-    // Spins up a PostgreSQL container using Testcontainers library
-    @ServiceConnection
-    static PostgreSQLContainer<?> postgreSQLContainer = new PostgreSQLContainer<>("postgres:15-alpine");
-
-    // Injects the random port Spring Boot assigned for this test
     @LocalServerPort
-    private Integer port;
+    private int port;
 
-    // Spring-injected utility to interact directly with the database
+    // Injected to seed test data — no POST endpoint exists on this service.
     @Autowired
-    private JdbcTemplate jdbcTemplate;
+    private InventoryRepository inventoryRepository;
+
+    private WebTestClient webTestClient;
 
     @BeforeEach
-    void setup() {
-        // Set the base URI and port for RestAssured so we can hit the running test server
-        RestAssured.baseURI = "http://localhost";
-        RestAssured.port = port;
+    void setUp() {
+        webTestClient = WebTestClient.bindToServer()
+                .baseUrl("http://localhost:" + port)
+                .build();
 
-        /**
-         * Spring Boot is smart enough to find and apply our migrations (main/resources/db) when the test starts —
-         * as long as you include Flyway as a dependency and Flyway is enabled in your configuration
-         * (which it is by default).
-         */
-
-        // Clear the table before each test to ensure a clean state
-        jdbcTemplate.execute("DELETE FROM t_inventory;");
-
-        // Insert test data into the inventory table
-        jdbcTemplate.execute("INSERT INTO t_inventory (sku_code, quantity) VALUES ('SKU001', 200);");
-        jdbcTemplate.execute("INSERT INTO t_inventory (sku_code, quantity) VALUES ('SKU002', 50);");
-    }
-
-    // Start the PostgreSQL container once for the test class
-    static {
-        postgreSQLContainer.start();
+        // Wipe between tests so each test owns its own state.
+        inventoryRepository.deleteAll();
     }
 
     @Test
-    void shouldReturnTrueWhenItemIsInStock() {
-        // Sends a GET request to the /api/inventory endpoint with a valid SKU and quantity
-        given()
-                .queryParam("skuCode", "SKU001") // SKU that exists in DB
-                .queryParam("quantity", 100)     // Quantity that is in stock
-                .when()
-                .get("/api/inventory")           // Endpoint to test
-                .then()
-                .log().all()                     // Logs the full response for debugging
-                .statusCode(200)                 // Asserts that HTTP status is 200 OK
-                .body(is("true"));               // Asserts the response body is the string "true"
+    void contextLoads() {
+    }
+
+    // --- isInStock: happy paths -----------------------------------------------
+
+    @Test
+    void isInStock_returns_true_when_stock_exceeds_requested_quantity() {
+        inventoryRepository.save(new Inventory(null, "samsung_tv_2025", 100));
+
+        webTestClient.get()
+                .uri("/api/inventory?skuCode=samsung_tv_2025&quantity=50")
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(Boolean.class)
+                .isEqualTo(true);
     }
 
     @Test
-    void shouldReturnFalseWhenItemDoesNotExist() {
-        // Sends a GET request with an invalid SKU
-        given()
-                .queryParam("skuCode", "NON_EXISTENT_SKU") // SKU not in DB
-                .queryParam("quantity", 100)               // Arbitrary quantity
-                .when()
-                .get("/api/inventory")
-                .then()
-                .log().all()
-                .statusCode(200)
-                .body(is("false"));                        // Should return "false" as item doesn't exist
+    void isInStock_returns_true_when_stock_exactly_matches_requested_quantity() {
+        // existsBySkuCodeAndQuantityGreaterThanEqual includes the equal case.
+        inventoryRepository.save(new Inventory(null, "iphone_15", 10));
+
+        webTestClient.get()
+                .uri("/api/inventory?skuCode=iphone_15&quantity=10")
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(Boolean.class)
+                .isEqualTo(true);
     }
+
+    // --- isInStock: sad paths -------------------------------------------------
+
+    @Test
+    void isInStock_returns_false_when_requested_quantity_exceeds_stock() {
+        inventoryRepository.save(new Inventory(null, "macbook_pro_2025", 3));
+
+        webTestClient.get()
+                .uri("/api/inventory?skuCode=macbook_pro_2025&quantity=5")
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(Boolean.class)
+                .isEqualTo(false);
+    }
+
+    @Test
+    void isInStock_returns_false_when_skuCode_does_not_exist() {
+        webTestClient.get()
+                .uri("/api/inventory?skuCode=nonexistent_sku&quantity=1")
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(Boolean.class)
+                .isEqualTo(false);
+    }
+
 }
+

@@ -1,26 +1,46 @@
-# ------
-# Build Stage
-# ------
-FROM gradle:8.10.2-jdk21 AS builder
+# =============================================
+# Dockerfile for Spring Boot Inventory Service (Multi-Module Gradle)
+# =============================================
 
-COPY --chown=gradle:gradle . /home/gradle/src
+# Stage 1: Build stage
+FROM eclipse-temurin:26-jdk AS build
 
-WORKDIR /home/gradle/src
+# Set working directory
+WORKDIR /app
 
-RUN ./gradlew build -x test
+# === Copy root-level Gradle files (build context = microservices-parent/) ===
+COPY ./build.gradle.kts ./settings.gradle.kts ./
+COPY ./gradlew ./gradlew.bat ./
+COPY ./gradle ./gradle
 
-# ------
-# Package Stage
-# ------
-FROM eclipse-temurin:21-jre
+# === Copy build descriptors for ALL modules (Gradle configures every module in
+#     settings.gradle.kts at startup, even when only one module is being built) ===
+COPY ./inventory-service/build.gradle.kts  ./inventory-service/build.gradle.kts
+COPY ./order-service/build.gradle.kts      ./order-service/build.gradle.kts
+COPY ./product-service/build.gradle.kts    ./product-service/build.gradle.kts
+COPY ./api-gateway/build.gradle.kts        ./api-gateway/build.gradle.kts
 
-RUN mkdir /app
+# === Copy source only for the module being built ===
+COPY ./inventory-service/src ./inventory-service/src
 
-COPY --from=builder /home/gradle/src/build/libs/*.jar /app/inventory-service.jar
+# Give execute permission to Gradle wrapper
+RUN chmod +x ./gradlew
 
-ENV POSTGRES_USER=admin \
-    POSTGRES_PWD=password
+# Force explicit TLS protocol list - JDK26 + Docker Desktop
+# The TLS hanbdlshake  with Maven Central canm fail without this
+ENV JAVA_TOOLS_OPTIONS="-Djdk.tls.client.protocols=TLSv1.2,TLSv1.3 -Dhttps.protocols=TLSv1.2,TLSv1.3"
 
-EXPOSE 8082
+# Build only the inventory-service module
+RUN ./gradlew :inventory-service:clean :inventory-service:bootJar --no-daemon
 
-ENTRYPOINT ["java", "-jar", "/app/inventory-service.jar"]
+# Stage 2: Runtime stage
+FROM eclipse-temurin:26-jdk
+
+WORKDIR /app
+
+# Copy the built JAR
+COPY --from=build /app/inventory-service/build/libs/*.jar app.jar
+
+EXPOSE 8083
+
+ENTRYPOINT ["java", "-jar", "app.jar"]

@@ -1,0 +1,62 @@
+# docker compose -p comp3095-s2026 up -d
+# docker compose -p comp3095-s2026 up -d --build
+services:
+  inventory-service:
+    build:
+      context: ..                    # Go up to microservices-parent folder
+      dockerfile: inventory-service/Dockerfile
+
+    container_name: inventory-service
+    restart: unless-stopped
+    ports:
+      - "8083:8083"
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres-inventory:5432/inventory_service
+      SPRING_DATASOURCE_USERNAME: inventory_user
+      SPRING_DATASOURCE_PASSWORD: inventory_password
+
+    # Waits for Postgres to be fully ready before starting the Spring Boot app
+    depends_on:
+      postgres-inventory:
+        condition: service_healthy
+
+  postgres-inventory:
+    image: postgres:latest
+    container_name: postgres-inventory
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: inventory_service
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5433:5432"   # Host 5433 avoids collision with postgres-order (5431) and local Postgres (5432)
+    volumes:
+      - postgres_inventory_data:/var/lib/postgresql/data
+      # Runs once on first startup (empty volume). Creates the inventory_user application account.
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d inventory_service"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pgadmin-inventory:
+    image: dpage/pgadmin4:latest
+    container_name: inventory-pgadmin
+    restart: unless-stopped
+    ports:
+      - "5051:80"     # Host 5051 avoids collision with order-pgadmin (5050). Access at http://localhost:5051
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@comp3095.ca
+      PGADMIN_DEFAULT_PASSWORD: password
+    depends_on:
+      postgres-inventory:
+        condition: service_healthy
+    volumes:
+      - pgadmin_inventory_data:/var/lib/pgadmin
+
+volumes:
+  postgres_inventory_data:
+  pgadmin_inventory_data:

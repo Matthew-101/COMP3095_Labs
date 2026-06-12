@@ -1,0 +1,45 @@
+inventory-service:
+  version: v1.0
+
+spring:
+  application:
+    name: inventory-service
+
+  datasource:
+    # postgres-inventory is the service name defined in inventory-service/compose.yaml
+    url: jdbc:postgresql://postgres-inventory:5432/inventory_service
+    username: inventory_user
+    password: inventory_password
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+
+    hibernate:
+      # Flyway owns schema creation — Hibernate must not touch DDL
+      ddl-auto: none
+
+server:
+  port: 8083
+
+# Exposes all actuator endpoints (health, info, metrics, etc.)
+# Restrict in production to only what monitoring needs.
+management:
+  endpoints:
+    web:
+      exposure:
+        include: '*'
+
+# Swagger GUI Documentation  for Endpoints
+# http://localhost:8082/swagger-ui
+springdoc:
+  swagger-ui:
+    path: /swagger-ui
+
+  # Swagger API Documentation  for Endpoints
+  # http://localhost:8082/api-docs
+  api-docs:
+    path: /api-docs

@@ -1,10 +1,5 @@
 package ca.gbc.comp3095.orderservice.dto;
 
-import java.math.BigDecimal;
+import java.util.List;
 
-public record OrderRequest(
-        Long id,
-        String orderNumber,
-        String skuCode,
-        BigDecimal price,
-        Integer quantity) { }
+public record OrderRequest(List<OrderLineItemDto> items) {}

@@ -2,87 +2,83 @@ package ca.gbc.comp3095.orderservice;
 
 import ca.gbc.comp3095.orderservice.stubs.InventoryClientStub;
 import com.github.tomakehurst.wiremock.WireMockServer;
-import io.restassured.RestAssured;
-import org.hamcrest.Matchers;
+import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
-import org.springframework.cloud.contract.wiremock.AutoConfigureWireMock;
+import org.springframework.http.MediaType;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.web.reactive.server.WebTestClient;
 import org.testcontainers.containers.PostgreSQLContainer;
 
-import static org.hamcrest.MatcherAssert.assertThat;
+import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig;
 
-/**
- * Integration test for the Order Service.
- * Uses TestContainers to start an ephemeral PostgreSQL container.
- * Uses RestAssured to test HTTP POST against the /api/order endpoint.
- */
+// Starts a full Spring application context on a random available port for integration testing
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@AutoConfigureWireMock(port = 0)
 class OrderServiceApplicationTests {
 
-    // Use TestContainers to spin up a real PostgreSQL instance for testing
-    @ServiceConnection
-    static PostgreSQLContainer<?> postgreSQLContainer = new PostgreSQLContainer<>("postgres:15-alpine");
 
-    // Injects the random port the test server is running on
-    @LocalServerPort
-    private Integer port;
+    @RegisterExtension
+    static WireMockExtension wireMockServer = WireMockExtension.newInstance()
+            .options(wireMockConfig().dynamicPort())
+            .configureStaticDsl(true)
+            .build();
 
-    //Autowire the WireMockServer to get access to the WireMock runtime information
-    @Autowired
-    private WireMockServer wireMockServer;
-
-    // Set up RestAssured with the server URL and random port
-    @BeforeEach
-    void setup() {
-        RestAssured.baseURI = "http://localhost";
-        RestAssured.port = port;
+    @DynamicPropertySource
+    static void overrideInventoryServiceUrl(DynamicPropertyRegistry registry){
+        registry.add("inventory.service.url", wireMockServer::baseUrl);
     }
 
+    // Spins up a real PostgreSQL instance and wires it into Spring's datasource auto-configuration
+    @ServiceConnection
+    static PostgreSQLContainer<?> postgreSQLContainer = new PostgreSQLContainer<>("postgres:latest");
+
     static {
-        postgreSQLContainer.start(); // Start the container before tests run
+        postgreSQLContainer.start();
+    }
+
+    @LocalServerPort
+    private int port;
+
+    private WebTestClient webTestClient;
+
+    // WebTestClient is not auto-registered for servlet-based apps — build it manually with the random port
+    @BeforeEach
+    void setup() {
+        webTestClient = WebTestClient.bindToServer()
+                .baseUrl("http://localhost:" + port)
+                .build();
     }
 
     @Test
     void placeOrderTest() {
-        // Sample request body to simulate placing an order
+
+        InventoryClientStub.stubInventoryCall("samsung_tv_2025", 10);
+
         String orderJson = """
                 {
-                  "skuCode": "samsung_tv_2025",
-                  "price": 5000,
-                  "quantity": 10
+                  "items": [
+                    {
+                      "skuCode": "samsung_tv_2025",
+                      "price": 5000,
+                      "quantity": 10
+                    }
+                  ]
                 }
                 """;
 
-        //Call the InventoryClientStub
-        InventoryClientStub.stubInventoryCall("samsung_tv_2025", 10);
-
-        /**
-         * The following block:
-         * - Sends a POST request to /api/order
-         * - Sets content type as JSON
-         * - Sends the orderJson in the request body
-         * - Expects HTTP 201 Created as the response
-         * - Extracts the response body as a string
-         * - Asserts that the body equals "Order Placed Successfully"
-         */
-        var responseBodyString = RestAssured
-                .given()                          // Start building the request
-                .contentType("application/json")  // Set content type to JSON
-                .body(orderJson)                  // Set the request payload
-                .when()
-                .post("/api/order")               // Specify endpoint and send POST
-                .then()
-                .log().all()                      // Log full request and response for debugging
-                .statusCode(201)                  // Assert that response status is 201 (Created)
-                .extract()
-                .body().asString();               // Extract the body as a String
-
-        // Validate that the response is what we expect
-        assertThat(responseBodyString, Matchers.is("Successfully Placed Order"));
+        webTestClient.post()
+                .uri("/api/order")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(orderJson)
+                .exchange()
+                .expectStatus().isCreated()
+                .expectBody(String.class)
+                .isEqualTo("Successfully Placed Order");
     }
+
 }

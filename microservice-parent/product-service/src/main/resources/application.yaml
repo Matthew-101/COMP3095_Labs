@@ -1,0 +1,43 @@
+product-service:
+  version: v1.0
+
+spring:
+  application:
+    name: product-service
+
+  # Update container name
+  mongodb:
+    uri: mongodb://admin:password@mongodb:27017/product-service?authSource=admin
+
+  data:
+    redis:
+      host: redis      # Docker service name
+      port: 6379
+      password: password
+
+  cache:
+    type: redis         # ← critical!
+    redis:
+      time-to-live: 60s
+
+server:
+  port: 8080
+
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: '*'  #Expose all actuator endpoints via HTTP
+
+# Swagger GUI Documentation  for Endpoints
+# http://localhost:8080/swagger-ui
+springdoc:
+  swagger-ui:
+    path: /swagger-ui
+
+# Swagger API Documentation  for Endpoints
+# http://localhost:8080/api-docs
+  api-docs:
+    path: /api-docs
+

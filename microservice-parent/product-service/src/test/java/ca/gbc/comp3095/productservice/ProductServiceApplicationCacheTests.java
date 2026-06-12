@@ -1,208 +1,210 @@
 package ca.gbc.comp3095.productservice;
 
-import ca.gbc.comp3095.productservice.dto.ProductRequest;
 import ca.gbc.comp3095.productservice.dto.ProductResponse;
-import ca.gbc.comp3095.productservice.model.Product;
-import ca.gbc.comp3095.productservice.repository.ProductRepository;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import ca.gbc.comp3095.productservice.respository.ProductRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.cache.Cache;
 import org.springframework.cache.CacheManager;
-import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.http.MediaType;
-import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
-import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.web.reactive.server.WebTestClient;
 import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.MongoDBContainer;
-import org.testcontainers.containers.wait.strategy.Wait;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
+import org.testcontainers.mongodb.MongoDBContainer;
 
-import java.math.BigDecimal;
-import java.time.Duration;
+import java.util.List;
+import java.util.Map;
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.clearInvocations;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
+import static org.assertj.core.api.Assertions.assertThat;
 
-/**
- * ============================================================================
- *  Integration Test: ProductService + Redis Cache
- *  -------------------------------------------------
- *  This test suite validates that our caching annotations actually behave
- *  the way we expect them to. Each test spins up a clean MongoDB and Redis
- *  instance using Testcontainers.
- *
- *  Covered behaviors (based on ProductServiceImpl):
- *   createProduct()  -> @CachePut(PRODUCT_CACHE, key = "#result.id()")
- *   getAllProducts() -> @Cacheable(PRODUCT_CACHE, key = "'ALL_PRODUCTS'")
- *   updateProduct()  -> @CachePut(PRODUCT_CACHE, key = "#result")
- *   deleteProduct()  -> @CacheEvict(PRODUCT_CACHE, key = "#productId")
- * ============================================================================
- */
-@Testcontainers
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@AutoConfigureMockMvc
-class ProductServiceApplicationCacheTests {
 
-    // ---------------------------------------------------------
-    // STEP 1: Start ephemeral Redis and Mongo containers
-    // ---------------------------------------------------------
-    @Container
-    @ServiceConnection(name = "redis")
-    static GenericContainer<?> redisContainer = new GenericContainer<>(DockerImageName.parse("redis:7.4.3"))
+@SpringBootTest(webEnvironment =  SpringBootTest.WebEnvironment.RANDOM_PORT)
+public class ProductServiceApplicationCacheTests {
+
+    @Autowired
+    private ProductRepository productRepository;
+
+    @Autowired
+    private CacheManager cacheManager;
+
+    @ServiceConnection
+    static MongoDBContainer mongoDbContainer = new MongoDBContainer("mongo:latest");
+
+    //Redis
+    //No dedicated testcontainer needed for Redis module testing - GenericContainers serves our needs
+    static GenericContainer<?> redisContainer = new GenericContainer("redis:latest")
             .withExposedPorts(6379)
-            .waitingFor(Wait.forListeningPort())
-            .withStartupTimeout(Duration.ofSeconds(120));
+            .withCommand("redis-server","--requirepass", "password");
 
-    @Container
-    @ServiceConnection(name = "mongodb")
-    static MongoDBContainer mongodbContainer = new MongoDBContainer(DockerImageName.parse("mongo:5.0"))
-            .withStartupTimeout(Duration.ofSeconds(120));
 
-    // ---------------------------------------------------------
-    // STEP 2: Inject Spring test utilities + beans
-    // ---------------------------------------------------------
-    @Autowired private MockMvc mockMvc;
-    @Autowired private CacheManager cacheManager;
-    @Autowired private ObjectMapper objectMapper;
-
-    @Autowired private ProductRepository productRepository;
-    @MockitoSpyBean private ProductRepository productRepositorySpy; // allows us to verify cache hits vs DB hits
-
-    @Autowired private RedisConnectionFactory redisConnectionFactory; // used to flush Redis before each test
-
-    // Helper method to retrieve our configured cache
-    private Cache productCache() {
-        Cache c = cacheManager.getCache("PRODUCT_CACHE");
-        assertNotNull(c, "PRODUCT_CACHE must exist and be configured correctly");
-        return c;
+    static {
+        mongoDbContainer.start();
+        redisContainer.start();
     }
 
-    // ---------------------------------------------------------
-    // STEP 3: Reset state before each test
-    // ---------------------------------------------------------
+    @DynamicPropertySource
+    static void properties(DynamicPropertyRegistry registry) {
+        registry.add("spring.data.redis.host", redisContainer::getHost);
+        registry.add("spring.data.redis.port", () -> redisContainer.getMappedPort(6379));
+        registry.add("spring.data.redis.password", () -> "password");
+    }
+
+
+    @LocalServerPort
+    private int port;
+
+    private WebTestClient webTestClient;
+
     @BeforeEach
     void setUp() {
-        // Clear MongoDB data
+        webTestClient = WebTestClient.bindToServer()
+                .baseUrl("http://localhost:" + port)
+                .build();
+
+        //reset the state of our database (prior to test) to a pristine state
         productRepository.deleteAll();
 
-        // Flush Redis DB completely to avoid serializer mismatches
-        try (var conn = redisConnectionFactory.getConnection()) {
-            conn.serverCommands().flushDb();
-        }
-
-        // Clear the Spring CacheManager layer
+        //reset the state of our cache (prior to test) to a pristine state
         Cache cache = cacheManager.getCache("PRODUCT_CACHE");
-        if (cache != null) cache.clear();
+        if(cache != null)
+            cache.clear();
 
-        // Reset spy counters so DB hit checks are accurate
-        clearInvocations(productRepositorySpy);
     }
 
-    // ---------------------------------------------------------
-    // TEST 1: Verify @CachePut on createProduct()
-    // ---------------------------------------------------------
+
+    // Helper method only
+    private Map<?, ?> createProduct(String name, String description, int price){
+
+        String requestBody = """
+                {                  
+                  "name": "%s",
+                  "description": "%s",
+                  "price":  %d               
+                }                
+                """.formatted(name, description, price);
+
+        return webTestClient.post()
+                .uri("/api/product")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(requestBody)
+                .exchange()
+                .expectStatus().isCreated()
+                .expectBody(Map.class)
+                .returnResult()
+                .getResponseBody();
+
+    }
+
+
     @Test
-    void createProduct_cachesProductResponseUnderId() throws Exception {
-        var req = new ProductRequest(null, "Samsung TV", "2025 Model", BigDecimal.valueOf(2000));
+    void createProduct_shouldPopulateCacheWithProductId(){
 
-        // Perform POST -> should store Product in Mongo + cache the ProductResponse
-        MvcResult result = mockMvc.perform(post("/api/product")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(req)))
-                .andExpect(status().isCreated())
-                .andExpect(content().contentType(MediaType.APPLICATION_JSON))
-                .andReturn();
+        Map<?, ?> response   = createProduct("Samsung TV", "Samsung TV 2026", 2000);
+        assertThat(response).isNotNull();
+        String productId = (String) response.get("id");
 
-        var body = objectMapper.readValue(result.getResponse().getContentAsString(), ProductResponse.class);
-        assertNotNull(body.id(), "Response must include generated product ID");
+        Cache cache = cacheManager.getCache("PRODUCT_CACHE");
+        assertThat(cache).isNotNull();
 
-        // Verify that the ProductResponse is now cached by its id
-        ProductResponse cached = productCache().get(body.id(), ProductResponse.class);
-        assertNotNull(cached, "ProductResponse should be cached under product ID");
-        assertEquals("Samsung TV", cached.name());
-        assertEquals(BigDecimal.valueOf(2000), cached.price());
+        ProductResponse cachedProduct = cache.get(productId, ProductResponse.class);
+        assertThat(cachedProduct).isNotNull();
+
+        assertThat(cachedProduct.name()).isEqualTo("Samsung TV");
+
     }
 
-    // ---------------------------------------------------------
-    // TEST 2: Verify @Cacheable on getAllProducts()
-    // ---------------------------------------------------------
     @Test
-    void getAllProducts_isCached_afterFirstCall_andSkipsRepository_onSecondCall() throws Exception {
-        // Seed MongoDB with one product
-        productRepository.save(Product.builder()
-                .name("Text Book")
-                .description("COMP3095")
-                .price(BigDecimal.valueOf(100))
-                .build());
+    void getAllProducts_shouldServeFromCacheOnSubsequentCall(){
+        Map<?, ?> response  = createProduct("LG Monitor", "LG Monitor2026", 1000);
 
-        // First call should hit the repository (DB)
-        mockMvc.perform(get("/api/product"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$[0].name").value("Text Book"));
+        // GET - "ALL_PRODUCTS" cache miss -> hit MongoDB -> cache the response (List with 1 Item)
+        List<Map> firstResult = webTestClient.get()
+                .uri("/api/product")
+                .exchange()
+                .expectStatus().isOk()
+                .expectBodyList(Map.class)
+                .returnResult()
+                .getResponseBody();
 
-        verify(productRepositorySpy, times(1)).findAll();
-        clearInvocations(productRepositorySpy);
+        assertThat(firstResult).hasSize(1);
 
-        // Second call should bypass DB entirely (read from Redis cache)
-        mockMvc.perform(get("/api/product"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$[0].name").value("Text Book"));
+        Cache cache = cacheManager.getCache("PRODUCT_CACHE");
+        assertThat(cache).isNotNull();
+        assertThat(cache.get("ALL_PRODUCTS", List.class)).isNotNull();
 
-        verify(productRepositorySpy, times(0)).findAll();
+        Map<?, ?> secondResponse  = createProduct("iphone", "iphone 15 - 2026", 1500);
+
+        // GET - "ALL_PRODUCTS" cache HIT -> does not hit MongoDB -> cache the response (List with 1 Item) - NOT 2
+        List<Map> secondResult = webTestClient.get()
+                .uri("/api/product")
+                .exchange()
+                .expectStatus().isOk()
+                .expectBodyList(Map.class)
+                .returnResult()
+                .getResponseBody();
+
+
+        assertThat(secondResult)
+                .hasSize(1);
+
+        assertThat(secondResult.get(0).get("name")).isEqualTo("LG Monitor");
+
+
     }
 
-    // ---------------------------------------------------------
-    // TEST 3: Verify @CachePut on updateProduct()
-    // ---------------------------------------------------------
     @Test
-    void updateProduct_cachesIdStringUnderIdKey() throws Exception {
-        // Seed initial product
-        var p = productRepository.save(Product.builder()
-                .name("Laptop").description("Base").price(BigDecimal.valueOf(2000)).build());
+    void updateProduct_shouldRefreshCacheEntry(){
+        Map<?, ?> response  = createProduct("LG Monitor", "LG Monitor2026", 1000);
+        String productId =  (String) response.get("id");
 
-        var update = new ProductRequest(p.getId(), "Gaming Laptop", "Pro", BigDecimal.valueOf(3000));
+        Cache cache = cacheManager.getCache("PRODUCT_CACHE");
+        assertThat(cache).isNotNull();
+        assertThat(cache.get(productId, ProductResponse.class)).isNotNull();
 
-        // Perform PUT -> should update DB and cache id under its own key
-        mockMvc.perform(put("/api/product/{id}", p.getId())
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(update)))
-                .andExpect(status().isNoContent());
+        // @CachePut(key = "#result" ) stores the returned String Id in the cache
+        webTestClient.put()
+                .uri("/api/product/" + productId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                  {
+                   "name": "Updated Name",
+                   "description": "Updated Description",
+                    "price": 500                                                    
+                  }
+                  """)
+                .exchange()
+                .expectStatus().isNoContent();
 
-        // Confirm that the ID was cached as a simple string value
-        String cachedId = productCache().get(p.getId(), String.class);
-        assertNotNull(cachedId, "Updated product ID should be cached as String");
-        assertEquals(p.getId(), cachedId);
+        //After the cached value for this key is the String Id (not a ProductResponse)
+        assertThat(cache.get(productId, String.class)).isNotNull();
+
     }
 
-    // ---------------------------------------------------------
-    // TEST 4: Verify @CacheEvict on deleteProduct()
-    // ---------------------------------------------------------
+
     @Test
-    void deleteProduct_evictsSingleItemCacheEntry() throws Exception {
-        // Seed DB with one product
-        var p = productRepository.save(Product.builder()
-                .name("Phone").description("Base").price(BigDecimal.valueOf(500)).build());
+    void deleteProduct_shouldEvictCacheEntry(){
+        Map<?, ?> response  = createProduct("LG Monitor", "LG Monitor2026", 1000);
+        String productId =  (String) response.get("id");
 
-        // Preload cache manually to simulate an existing entry
-        productCache().put(p.getId(), new ProductResponse(p.getId(), p.getName(), p.getDescription(), p.getPrice()));
-        assertNotNull(productCache().get(p.getId()), "Precondition: cache should contain product before deletion");
+        Cache cache = cacheManager.getCache("PRODUCT_CACHE");
+        assertThat(cache).isNotNull();
+        assertThat(cache.get(productId, ProductResponse.class)).isNotNull();
 
-        // Perform DELETE -> should remove from DB and evict cache entry
-        mockMvc.perform(delete("/api/product/{id}", p.getId()))
-                .andExpect(status().isNoContent());
 
-        assertNull(productCache().get(p.getId()), "Cache entry must be evicted after deletion");
+        webTestClient.delete()
+                .uri("/api/product/" + productId)
+                .exchange()
+                .expectStatus().isNoContent();
+
+        // Assert that the product has been evicted from our cache
+        assertThat(cache.get(productId, String.class)).isNull();
+
     }
+
+
 }

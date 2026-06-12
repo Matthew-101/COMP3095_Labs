@@ -1,0 +1,86 @@
+services:
+
+  product-service:
+    build:
+      context: ..
+      dockerfile: product-service/Dockerfile
+
+    container_name: product-service
+    restart: no
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+  mongodb:
+    container_name: product-mongodb
+    image: 'mongo:latest'
+    restart: no
+    environment:
+      MONGO_INITDB_DATABASE: product-service
+      MONGO_INITDB_ROOT_PASSWORD: password
+      MONGO_INITDB_ROOT_USERNAME: admin
+    ports:
+      - '27017:27017'
+    volumes:
+      - mongodb_data:/data/db
+      # UPDATE path
+      - ./docker/mongo/init-mongo.js:/docker-entrypoint-initdb.d/init-mongo.js:ro
+
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 4
+
+  mongo-express:
+    container_name: product-mongo-express
+    image: 'mongo-express:latest'
+    restart: no
+    environment:
+      ME_CONFIG_BASICAUTH_USERNAME: admin
+      ME_CONFIG_BASICAUTH_PASSWORD: password
+      ME_CONFIG_MONGODB_ENABLE_ADMIN: true
+      ME_CONFIG_MONGODB_URL: mongodb://admin:password@mongodb:27017/
+    ports:
+      - '8081:8081'
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+  redis:
+    image: redis:latest
+    container_name: product-redis
+    restart: no
+    # requirepass enables password auth -- application.yaml (spring.data.redis.password)
+    command: [ "redis-server","--requirepass", "password" ]
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [ "CMD","redis-cli","-a","password","ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 4
+
+  redisinsight:
+    image: redis/redisinsight:latest
+    container_name: product-redisinsight
+    restart: no
+    ports:
+      - '5540:5540'
+    depends_on:
+        redis:
+          condition: service_healthy
+    volumes:
+      - redisinsight_data:/data
+
+volumes:
+  mongodb_data:
+  redis_data:
+  redisinsight_data:

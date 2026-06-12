@@ -3,9 +3,11 @@ package ca.gbc.comp3095.productservice.service;
 import ca.gbc.comp3095.productservice.dto.ProductRequest;
 import ca.gbc.comp3095.productservice.dto.ProductResponse;
 import ca.gbc.comp3095.productservice.model.Product;
-import ca.gbc.comp3095.productservice.repository.ProductRepository;
+import ca.gbc.comp3095.productservice.respository.ProductRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.cache.Cache;
+import org.springframework.cache.CacheManager;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.CachePut;
 import org.springframework.cache.annotation.Cacheable;
@@ -14,35 +16,27 @@ import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.List;
-
-/*
-* 1. @Cacheable -> "Read from cache of exists, otherwise run method & cache result"
-*    - value = "PRODUCT_CACHE"
-*    - key = ""
-*
-* 2. @CachePut -> "Always run the method, then PUT the result in cache"
-*    - Used to create/update so cache stays fresh
-*    - key = "#result.id()"
-*
-* 3. @CacheEvict -> "Remove entry from cache"
-*    - key: "#productId"
-*
- */
 
 @Service
 @Slf4j
 @RequiredArgsConstructor
 public class ProductServiceImpl implements ProductService {
 
-    private final ProductRepository _productRepository;
+    private final ProductRepository productRepository;
     private final MongoTemplate mongoTemplate;
+    private final CacheManager cacheManager;
 
+    /**
+     *  Our createProduct - caches the newly created product id into Redis 'after' saving out mongodb
+     *  The cache key is the ID (primary key) of the newly created product
+     */
     @Override
-    @CachePut(value = "PRODUCT_CACHE", key="#result.id()")
+    @CachePut(value = "PRODUCT_CACHE",  key = "#result.id()")
     public ProductResponse createProduct(ProductRequest productRequest) {
 
-        log.debug("Create new product {}", productRequest);
+        log.info("Creating a  new product {}",  productRequest);
 
         Product product = Product.builder()
                 .name(productRequest.name())
@@ -50,54 +44,62 @@ public class ProductServiceImpl implements ProductService {
                 .price(productRequest.price())
                 .build();
 
-        //save product to database
-        _productRepository.save(product);
-        log.debug("Successfully saved new product {}", product);
+
+        productRepository.save(product);
+        log.debug("Saved product {}",   product);
+
 
         /**
-         *
-         * Cache productCache = cacheManager.getCache("PRODUCT_CACHE");
-         * productCache.put(product.getId(), Product)
-         *
-         */
 
-        return new ProductResponse(product.getId(), product.getName(),
-                product.getDescription(), product.getPrice());
+          // If you wanted to instead wanted to manually add to you cache you could use this code instead
+          Cache productCache = cacheManager.getCache("PRODUCT_CACHE");
+          productCache.put(product.getId(), product);
+       **/
+
+        return new ProductResponse(product.getId(),
+                product.getName(),
+                product.getDescription(),
+                product.getPrice());
     }
 
     @Override
     @Cacheable(value = "PRODUCT_CACHE", key = "'ALL_PRODUCTS'")
     public List<ProductResponse> getAllProducts() {
 
-        log.debug("Returning a list of Products");
-        List<Product> products = _productRepository.findAll();
+        log.debug("Returning a list of all products");
 
-        return products
+        List<Product> products = productRepository.findAll();
+
+        return new ArrayList<>(products
                 .stream()
                 .map(this::mapToProductResponse)
-                .toList();
+                .toList());
     }
 
     private ProductResponse mapToProductResponse(Product product) {
-        return new ProductResponse(product.getId(), product.getName(),
-                product.getDescription(), product.getPrice());
+        return new ProductResponse(product.getId(),
+                product.getName(),
+                product.getDescription(),
+                product.getPrice());
     }
 
+
     @Override
-    @CachePut(value = "PRODUCT_CACHE", key="#result")
+    @CachePut(value = "PRODUCT_CACHE", key = "#result" )
     public String updateProduct(String productId, ProductRequest productRequest) {
 
-        log.debug("Updating product with id {}",  productId);
+        log.debug("Update product with Id {}", productId);
 
         Query query = new Query();
         query.addCriteria(Criteria.where("id").is(productId));
-        Product product = mongoTemplate.findOne(query, Product.class);
 
-        if(product != null){
-            product.setName(productRequest.name());
-            product.setDescription(productRequest.description());
-            product.setPrice(productRequest.price());
-            return  _productRepository.save(product).getId();
+        Product product  = mongoTemplate.findOne(query, Product.class);
+
+        if (product != null) {
+             product.setName(productRequest.name());
+             product.setDescription(productRequest.description());
+             product.setPrice(productRequest.price());
+             return productRepository.save(product).getId();
         }
         return productId;
     }
@@ -105,7 +107,8 @@ public class ProductServiceImpl implements ProductService {
     @Override
     @CacheEvict(value = "PRODUCT_CACHE", key="#productId")
     public void deleteProduct(String productId) {
-        log.debug("Deleting product with id {}",  productId);
-        _productRepository.deleteById(productId);
+        log.debug("Deleting product with Id {}", productId);
+        productRepository.deleteById(productId);
     }
+
 }
